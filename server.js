@@ -1,67 +1,71 @@
-// MIQ Study Assistant Backend — Step 3 (Admin upload + Retrieval + Modes)
-// This version adds a simple admin page to create a vector store and upload PDFs
-// — no local CLI needed. Protect it with ADMIN_TOKEN env var.
-//
-// Env vars to set on Render:
-//   OPENAI_API_KEY   = your OpenAI key
-//   ORIGIN           = https://apollo235298.github.io   (for the widget)
-//   ADMIN_TOKEN      = a short passphrase you choose (to guard /admin)
-// Optional:
-//   VECTOR_STORE_ID  = vs_...  (if set, used instead of config file)
-//
-// Start command: node server.js
+// MIQ Study Assistant backend — admin upload + retrieval + modes (CommonJS)
 
-const fs = require('fs');
-const path = require('path');
-const express = require('express');
-const cors = require('cors');
-const bodyParser = require('body-parser');
-const multer = require('multer');
-const OpenAI = require('openai').default;
-
-const app = express();
-const upload = multer({ dest: '/tmp' });
-
-const ORIGIN = process.env.ORIGIN || 'https://apollo235298.github.io';
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
+const fs = require("fs");
+const path = require("path");
+const express = require("express");
+const cors = require("cors");
+const bodyParser = require("body-parser");
+const multer = require("multer");
+const OpenAI = require("openai");               // SDK v4 (CommonJS)
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-app.use(cors({ origin: ORIGIN }));
-app.use(bodyParser.json({ limit: '10mb' }));
+const app = express();
+const upload = multer({ dest: "/tmp" });
 
-// --- tiny config helper (stores vectorStoreId if not in env) ---
-const CONFIG_PATH = path.join(__dirname, 'config.json');
+// ===== basic hardening & logging
+process.on("unhandledRejection", (e) => {
+  console.error("UNHANDLED REJECTION:", e);
+});
+process.on("uncaughtException", (e) => {
+  console.error("UNCAUGHT EXCEPTION:", e);
+});
+
+// ===== config / env
+const ORIGIN = process.env.ORIGIN || "https://apollo235298.github.io";
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
+
+app.use(cors({ origin: ORIGIN }));
+app.use(bodyParser.json({ limit: "25mb" }));
+
+// Persist vector store id (uses env if set; falls back to config.json on disk)
+const CONFIG_PATH = path.join(__dirname, "config.json");
 function getVectorStoreId() {
   if (process.env.VECTOR_STORE_ID) return process.env.VECTOR_STORE_ID;
   try {
-    const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+    const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
     return cfg.vectorStoreId || null;
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 function setVectorStoreId(id) {
   try {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify({ vectorStoreId: id }, null, 2));
   } catch (e) {
-    console.error('Failed to write config.json:', e.message);
+    console.error("Failed writing config.json:", e.message);
   }
 }
 
-// ------------------ Public endpoints ------------------
-app.get('/', (req, res) => res.send('MIQ backend is running.'));
+// ===== health
+app.get("/", (_req, res) => res.send("MIQ backend is running."));
+app.get("/healthz", (_req, res) => res.json({ ok: true }));
 
-app.post('/api/ask', async (req, res) => {
+// ===== user API (widget calls this)
+app.post("/api/ask", async (req, res) => {
   const { question = "", course = "ENGAGING-CULTURE", mode = "default" } = req.body || {};
-  const vectorStoreId = getVectorStoreId();
-  const haveStore = !!vectorStoreId;
+  const vs = getVectorStoreId();
+  const haveStore = !!vs;
 
-  const system = `You are the MIQ Study Assistant for the course "${course}".
-Answer ONLY from the retrieved course readings when available.
-Always be concise and include citations when possible (chapter/page).
+  const system = `
+You are the MIQ Study Assistant for the course "${course}".
+Answer ONLY from retrieved course readings when available. Be concise.
+Always include citations when possible (chapter/page).
 Modes:
 - default: concise answer + 2–3 takeaways.
 - socratic: begin with 1–2 guiding questions, then a brief sourced note.
 - studyplan: 3–5 steps (read → reflect → practice) with citations.
-If evidence is insufficient, say so and suggest where to look.`;
+If evidence is insufficient, say so and suggest where to look.
+  `.trim();
 
   try {
     const request = {
@@ -74,44 +78,41 @@ If evidence is insufficient, say so and suggest where to look.`;
 
     if (haveStore) {
       request.tools = [{ type: "file_search" }];
-      request.attachments = [{ vector_store_id: vectorStoreId }];
+      request.attachments = [{ vector_store_id: vs }];
     }
 
     const resp = await client.responses.create(request);
     const text = resp.output_text || "No answer returned.";
-
-    // NOTE: For simplicity we return only text here.
-    // In a later step we can parse tool outputs to surface per-chunk citations.
     res.json({ answer: text, citations: [] });
   } catch (err) {
-    console.error(err);
+    console.error("ASK ERROR:", err?.response?.data || err?.message || err);
     res.status(500).json({ answer: "Sorry—there was a server error.", citations: [] });
   }
 });
 
-// ------------------ Admin endpoints ------------------
+// ===== admin guard
 function requireAdmin(req, res, next) {
-  const token = req.query.token || req.headers['x-admin-token'] || (req.body && req.body.token);
-  if (!ADMIN_TOKEN) return res.status(500).send("Admin not configured. Set ADMIN_TOKEN on the server.");
+  const token = req.query.token || req.headers["x-admin-token"] || (req.body && req.body.token);
+  if (!ADMIN_TOKEN) return res.status(500).send("Admin not configured. Set ADMIN_TOKEN in Environment.");
   if (token !== ADMIN_TOKEN) return res.status(403).send("Forbidden: bad or missing token.");
   next();
 }
 
-// simple admin UI
-app.get('/admin', (req, res) => {
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+// ===== admin UI (simple, no framework)
+app.get("/admin", (_req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.end(`<!doctype html>
 <meta charset="utf-8">
 <title>MIQ Admin</title>
 <style>
-  body{font-family:system-ui;margin:24px;line-height:1.5;max-width:880px}
+  body{font-family:system-ui;margin:24px;line-height:1.5;max-width:920px}
   input,button{font:inherit;padding:8px 10px}
   .card{border:1px solid #ddd;border-radius:12px;padding:16px;margin:12px 0}
   .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-  #log{white-space:pre-wrap;background:#f9fafb;border:1px solid #eee;border-radius:8px;padding:8px}
+  #log{white-space:pre-wrap;background:#f9fafb;border:1px solid #eee;border-radius:8px;padding:10px}
 </style>
 <h1>MIQ Admin</h1>
-<p>Use this once per course to create a vector store and upload PDFs.</p>
+<p>Create your vector store and upload PDFs (no CLI needed).</p>
 <div class="card">
   <div class="row">
     <label>Admin token <input id="token" placeholder="enter your admin token" /></label>
@@ -155,44 +156,62 @@ async function statusStore(){
 });
 
 // create store
-app.post('/admin/create', requireAdmin, async (req, res) => {
+app.post("/admin/create", requireAdmin, async (_req, res) => {
   try {
     const created = await client.vectorStores.create({ name: "ENGAGING-CULTURE" });
     setVectorStoreId(created.id);
-    res.send(`Vector store created: ${created.id}\n(Also add VECTOR_STORE_ID=${created.id} to your Render Environment for persistence.)`);
+    res.send(`Vector store created: ${created.id}
+(Also add VECTOR_STORE_ID=${created.id} to Render → Environment for persistence.)`);
   } catch (e) {
-    console.error(e);
-    res.status(500).send('Failed to create store: ' + (e.message || e));
+    console.error("CREATE STORE ERROR:", e?.response?.data || e?.message || e);
+    res.status(500).send("Failed to create store: " + (e.message || e));
   }
 });
 
-// upload PDFs
 // upload PDFs (two-step: files.create → vectorStores.files.create)
-app.post('/admin/upload', requireAdmin, upload.array('files'), async (req, res) => {
+app.post("/admin/upload", requireAdmin, upload.array("files"), async (req, res) => {
   const vs = getVectorStoreId();
   if (!vs) return res.status(400).send('No vector store set. Click "Create Vector Store" first.');
 
   try {
     const results = [];
     for (const f of req.files || []) {
-      // Step 1: upload the raw file
+      // 1) Upload the raw file to OpenAI
       const uploaded = await client.files.create({
         file: fs.createReadStream(f.path),
-        purpose: "assistants",
+        purpose: "assistants"
       });
 
-      // Step 2: attach that file to the vector store
+      // 2) Attach that file to the vector store
       await client.vectorStores.files.create({
         vector_store_id: vs,
-        file_id: uploaded.id,
+        file_id: uploaded.id
       });
 
       results.push(`${f.originalname} → attached as ${uploaded.id}`);
       try { fs.unlinkSync(f.path); } catch {}
     }
-    res.send('Uploaded:\n' + results.join('\n'));
+    res.send("Uploaded:\n" + results.join("\n"));
   } catch (e) {
-    console.error(e);
-    res.status(500).send('Upload failed: ' + (e.message || e));
+    console.error("UPLOAD ERROR:", e?.response?.data || e?.message || e);
+    res.status(500).send("Upload failed: " + (e.message || e));
   }
 });
+
+// status
+app.get("/admin/status", requireAdmin, async (_req, res) => {
+  const vs = getVectorStoreId();
+  if (!vs) return res.send("No vector store configured yet.");
+  try {
+    const list = await client.vectorStores.files.list(vs);
+    res.send(`Vector store: ${vs}
+Files: ${list.data.length}
+` + list.data.map(x => `- ${x.id} (${x.status})`).join("\n"));
+  } catch (e) {
+    console.error("STATUS ERROR:", e?.response?.data || e?.message || e);
+    res.status(500).send("Status error: " + (e.message || e));
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log("MIQ backend listening on :" + PORT));
