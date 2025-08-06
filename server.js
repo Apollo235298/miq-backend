@@ -169,13 +169,26 @@ app.post("/admin/create", requireAdmin, async (_req, res) => {
 });
 
 // upload PDFs (two-step: files.create → vectorStores.files.create)
-app.post("/admin/upload", requireAdmin, upload.array("files"), async (req, res) => {
-  const vs = getVectorStoreId();
-  if (!vs) return res.status(400).send('No vector store set. Click "Create Vector Store" first.');
+// upload PDFs (two-step: files.create → vectorStores.files.create) with strict id checks
+app.post('/admin/upload', requireAdmin, upload.array('files'), async (req, res) => {
+  // Get and sanitize the vector store id
+  const vsRaw = (getVectorStoreId && getVectorStoreId()) || process.env.VECTOR_STORE_ID || "";
+  const vs = (typeof vsRaw === "string" ? vsRaw : (vsRaw && vsRaw.id) || "").toString().trim();
+
+  // Validate it looks like an OpenAI vector store id
+  if (!vs || !/^vs_[A-Za-z0-9_-]+$/.test(vs)) {
+    return res
+      .status(400)
+      .send(`Vector store id is invalid. Got "${String(vsRaw)}". Make sure VECTOR_STORE_ID is a plain string like vs_abc123...`);
+  }
 
   try {
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).send("No files received. Use the 'Choose Files' button, then click 'Upload PDFs'.");
+    }
+
     const results = [];
-    for (const f of req.files || []) {
+    for (const f of req.files) {
       // 1) Upload the raw file to OpenAI
       const uploaded = await client.files.create({
         file: fs.createReadStream(f.path),
@@ -190,13 +203,16 @@ app.post("/admin/upload", requireAdmin, upload.array("files"), async (req, res) 
 
       results.push(`${f.originalname} → attached as ${uploaded.id}`);
       try { fs.unlinkSync(f.path); } catch {}
+      console.log("UPLOAD OK:", f.originalname, "→", uploaded.id, "to", vs);
     }
+
     res.send("Uploaded:\n" + results.join("\n"));
   } catch (e) {
     console.error("UPLOAD ERROR:", e?.response?.data || e?.message || e);
     res.status(500).send("Upload failed: " + (e.message || e));
   }
 });
+
 
 // status
 app.get("/admin/status", requireAdmin, async (_req, res) => {
