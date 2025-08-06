@@ -168,32 +168,52 @@ app.post("/admin/create", requireAdmin, async (_req, res) => {
   }
 });
 
-// upload PDFs (two-step: files.create → vectorStores.files.create)
-// upload PDFs (two-step: files.create → vectorStores.files.create) with strict id checks
+// upload PDFs using the batch uploader (robust for PDFs)
 app.post('/admin/upload', requireAdmin, upload.array('files'), async (req, res) => {
-  // Get and sanitize the vector store id
-  const vsRaw = (getVectorStoreId && getVectorStoreId()) || process.env.VECTOR_STORE_ID || "";
-  const vs = (typeof vsRaw === "string" ? vsRaw : (vsRaw && vsRaw.id) || "").toString().trim();
-
-  // Validate it looks like an OpenAI vector store id
-  if (!vs || !/^vs_[A-Za-z0-9_-]+$/.test(vs)) {
-    return res
-      .status(400)
-      .send(`Vector store id is invalid. Got "${String(vsRaw)}". Make sure VECTOR_STORE_ID is a plain string like vs_abc123...`);
-  }
-
   try {
-    if (!req.files || req.files.length === 0) {
-      return res.status(400).send("No files received. Use the 'Choose Files' button, then click 'Upload PDFs'.");
+    // 1) Resolve/validate the vector store id as a string
+    const vsRaw = (getVectorStoreId && getVectorStoreId()) || process.env.VECTOR_STORE_ID || "";
+    const vs = (typeof vsRaw === "string" ? vsRaw : (vsRaw && vsRaw.id) || "").toString().trim();
+    if (!/^vs_[A-Za-z0-9_-]+$/.test(vs)) {
+      return res
+        .status(400)
+        .send(`Vector store id is invalid. Got "${String(vsRaw)}". Set VECTOR_STORE_ID to an id like vs_abc123...`);
     }
 
-    const results = [];
+    // 2) Make sure we actually received files
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).send("No files received. Use 'Choose Files' first, then click 'Upload PDFs'.");
+    }
+
+    // 3) Build readable streams (keep original filenames if possible)
+    const streams = req.files.map((f) => {
+      const s = fs.createReadStream(f.path);
+      // give the SDK a filename hint (helps some parsers)
+      s.path = f.originalname || f.path;
+      return s;
+    });
+
+    // 4) Use the batch uploader (handles multiple PDFs reliably)
+    const batch = await client.vectorStores.fileBatches.uploadAndPoll(vs, {
+      files: streams,
+    });
+
+    // 5) Clean up temp files
     for (const f of req.files) {
-      // 1) Upload the raw file to OpenAI
-      const uploaded = await client.files.create({
-        file: fs.createReadStream(f.path),
-        purpose: "assistants"
-      });
+      try { fs.unlinkSync(f.path); } catch {}
+    }
+
+    // 6) Report current store status
+    const list = await client.vectorStores.files.list(vs);
+    res.send(
+      `Uploaded ${req.files.length} file(s).\nStatus: ${batch.status}\nStore now has ${list.data.length} file(s).`
+    );
+  } catch (e) {
+    console.error("UPLOAD ERROR:", e?.response?.data || e?.message || e);
+    res.status(500).send("Upload failed: " + (e.message || e));
+  }
+});
+
 
       // 2) Attach that file to the vector store
       await client.vectorStores.files.create(vs, { file_id: uploaded.id });
