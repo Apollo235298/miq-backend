@@ -196,10 +196,8 @@ app.post('/admin/upload', requireAdmin, upload.array('files'), async (req, res) 
       });
 
       // 2) Attach that file to the vector store
-      await client.vectorStores.files.create({
-        vector_store_id: vs,
-        file_id: uploaded.id
-      });
+      await client.vectorStores.files.create(vs, { file_id: uploaded.id });
+
 
       results.push(`${f.originalname} → attached as ${uploaded.id}`);
       try { fs.unlinkSync(f.path); } catch {}
