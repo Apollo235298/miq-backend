@@ -167,17 +167,27 @@ app.post('/admin/create', requireAdmin, async (req, res) => {
 });
 
 // upload PDFs
+// upload PDFs (two-step: files.create → vectorStores.files.create)
 app.post('/admin/upload', requireAdmin, upload.array('files'), async (req, res) => {
   const vs = getVectorStoreId();
   if (!vs) return res.status(400).send('No vector store set. Click "Create Vector Store" first.');
+
   try {
     const results = [];
     for (const f of req.files || []) {
-      const up = await client.vectorStores.files.upload({
-        vector_store_id: vs,
-        file: fs.createReadStream(f.path)
+      // Step 1: upload the raw file
+      const uploaded = await client.files.create({
+        file: fs.createReadStream(f.path),
+        purpose: "assistants",
       });
-      results.push(`${f.originalname} -> uploaded (${up.id})`);
+
+      // Step 2: attach that file to the vector store
+      await client.vectorStores.files.create({
+        vector_store_id: vs,
+        file_id: uploaded.id,
+      });
+
+      results.push(`${f.originalname} → attached as ${uploaded.id}`);
       try { fs.unlinkSync(f.path); } catch {}
     }
     res.send('Uploaded:\n' + results.join('\n'));
@@ -186,19 +196,3 @@ app.post('/admin/upload', requireAdmin, upload.array('files'), async (req, res) 
     res.status(500).send('Upload failed: ' + (e.message || e));
   }
 });
-
-// status
-app.get('/admin/status', requireAdmin, async (req, res) => {
-  const vs = getVectorStoreId();
-  if (!vs) return res.send('No vector store configured yet.');
-  try {
-    const list = await client.vectorStores.files.list(vs);
-    res.send(`Vector store: ${vs}\nFiles: ${list.data.length}\n` + list.data.map(x => `- ${x.id} (${x.status})`).join('\n'));
-  } catch (e) {
-    console.error(e);
-    res.status(500).send('Status error: ' + (e.message || e));
-  }
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('MIQ backend (admin) listening on :' + PORT));
