@@ -6,19 +6,15 @@ const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const multer = require("multer");
-const OpenAI = require("openai");               // SDK v4 (CommonJS)
+const OpenAI = require("openai");               // OpenAI SDK v4 (CommonJS)
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const app = express();
 const upload = multer({ dest: "/tmp" });
 
-// ===== basic hardening & logging
-process.on("unhandledRejection", (e) => {
-  console.error("UNHANDLED REJECTION:", e);
-});
-process.on("uncaughtException", (e) => {
-  console.error("UNCAUGHT EXCEPTION:", e);
-});
+// --- harden logging so crashes show up in Render logs
+process.on("unhandledRejection", (e) => console.error("UNHANDLED REJECTION:", e));
+process.on("uncaughtException", (e) => console.error("UNCAUGHT EXCEPTION:", e));
 
 // ===== config / env
 const ORIGIN = process.env.ORIGIN || "https://apollo235298.github.io";
@@ -27,7 +23,7 @@ const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 app.use(cors({ origin: ORIGIN }));
 app.use(bodyParser.json({ limit: "25mb" }));
 
-// Persist vector store id (uses env if set; falls back to config.json on disk)
+// ===== tiny config store for VECTOR_STORE_ID (env wins)
 const CONFIG_PATH = path.join(__dirname, "config.json");
 function getVectorStoreId() {
   if (process.env.VECTOR_STORE_ID) return process.env.VECTOR_STORE_ID;
@@ -98,7 +94,7 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-// ===== admin UI (simple, no framework)
+// ===== admin UI
 app.get("/admin", (_req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.end(`<!doctype html>
@@ -110,6 +106,7 @@ app.get("/admin", (_req, res) => {
   .card{border:1px solid #ddd;border-radius:12px;padding:16px;margin:12px 0}
   .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   #log{white-space:pre-wrap;background:#f9fafb;border:1px solid #eee;border-radius:8px;padding:10px}
+  button{background:#f3f4f6;border:1px solid #e5e7eb;border-radius:8px}
 </style>
 <h1>MIQ Admin</h1>
 <p>Create your vector store and upload PDFs (no CLI needed).</p>
@@ -155,7 +152,7 @@ async function statusStore(){
 `);
 });
 
-// create store
+// ===== create store
 app.post("/admin/create", requireAdmin, async (_req, res) => {
   try {
     const created = await client.vectorStores.create({ name: "ENGAGING-CULTURE" });
@@ -168,10 +165,10 @@ app.post("/admin/create", requireAdmin, async (_req, res) => {
   }
 });
 
-// upload PDFs using the batch uploader (robust for PDFs)
-app.post('/admin/upload', requireAdmin, upload.array('files'), async (req, res) => {
+// ===== upload PDFs (robust batch uploader)
+app.post("/admin/upload", requireAdmin, upload.array("files"), async (req, res) => {
   try {
-    // 1) Resolve/validate the vector store id as a string
+    // 1) Resolve/validate the vector store id as a plain string
     const vsRaw = (getVectorStoreId && getVectorStoreId()) || process.env.VECTOR_STORE_ID || "";
     const vs = (typeof vsRaw === "string" ? vsRaw : (vsRaw && vsRaw.id) || "").toString().trim();
     if (!/^vs_[A-Za-z0-9_-]+$/.test(vs)) {
@@ -180,22 +177,21 @@ app.post('/admin/upload', requireAdmin, upload.array('files'), async (req, res) 
         .send(`Vector store id is invalid. Got "${String(vsRaw)}". Set VECTOR_STORE_ID to an id like vs_abc123...`);
     }
 
-    // 2) Make sure we actually received files
+    // 2) Ensure we actually received files
     if (!req.files || req.files.length === 0) {
       return res.status(400).send("No files received. Use 'Choose Files' first, then click 'Upload PDFs'.");
     }
 
-    // 3) Build readable streams (keep original filenames if possible)
+    // 3) Build readable streams and provide filename hints
     const streams = req.files.map((f) => {
       const s = fs.createReadStream(f.path);
-      // give the SDK a filename hint (helps some parsers)
-      s.path = f.originalname || f.path;
+      s.path = f.originalname || f.path; // hint for parsers/MIME
       return s;
     });
 
-    // 4) Use the batch uploader (handles multiple PDFs reliably)
+    // 4) Batch upload (handles multiple PDFs + processing)
     const batch = await client.vectorStores.fileBatches.uploadAndPoll(vs, {
-      files: streams,
+      files: streams
     });
 
     // 5) Clean up temp files
@@ -203,7 +199,7 @@ app.post('/admin/upload', requireAdmin, upload.array('files'), async (req, res) 
       try { fs.unlinkSync(f.path); } catch {}
     }
 
-    // 6) Report current store status
+    // 6) Report store status
     const list = await client.vectorStores.files.list(vs);
     res.send(
       `Uploaded ${req.files.length} file(s).\nStatus: ${batch.status}\nStore now has ${list.data.length} file(s).`
@@ -214,25 +210,7 @@ app.post('/admin/upload', requireAdmin, upload.array('files'), async (req, res) 
   }
 });
 
-
-      // 2) Attach that file to the vector store
-      await client.vectorStores.files.create(vs, { file_id: uploaded.id });
-
-
-      results.push(`${f.originalname} → attached as ${uploaded.id}`);
-      try { fs.unlinkSync(f.path); } catch {}
-      console.log("UPLOAD OK:", f.originalname, "→", uploaded.id, "to", vs);
-    }
-
-    res.send("Uploaded:\n" + results.join("\n"));
-  } catch (e) {
-    console.error("UPLOAD ERROR:", e?.response?.data || e?.message || e);
-    res.status(500).send("Upload failed: " + (e.message || e));
-  }
-});
-
-
-// status
+// ===== status
 app.get("/admin/status", requireAdmin, async (_req, res) => {
   const vs = getVectorStoreId();
   if (!vs) return res.send("No vector store configured yet.");
