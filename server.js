@@ -6,13 +6,13 @@ const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const multer = require("multer");
-const OpenAI = require("openai");               // OpenAI SDK v4 (CommonJS)
+const OpenAI = require("openai");            // OpenAI SDK v4 (CommonJS)
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const app = express();
 const upload = multer({ dest: "/tmp" });
 
-// --- harden logging so crashes show up in Render logs
+// --- log unhandled errors to Render logs
 process.on("unhandledRejection", (e) => console.error("UNHANDLED REJECTION:", e));
 process.on("uncaughtException", (e) => console.error("UNCAUGHT EXCEPTION:", e));
 
@@ -165,7 +165,7 @@ app.post("/admin/create", requireAdmin, async (_req, res) => {
   }
 });
 
-// ===== upload PDFs (robust batch uploader)
+// ===== upload PDFs (robust batch uploader with verbose errors)
 app.post("/admin/upload", requireAdmin, upload.array("files"), async (req, res) => {
   try {
     // 1) Resolve/validate the vector store id as a plain string
@@ -182,10 +182,12 @@ app.post("/admin/upload", requireAdmin, upload.array("files"), async (req, res) 
       return res.status(400).send("No files received. Use 'Choose Files' first, then click 'Upload PDFs'.");
     }
 
-    // 3) Build readable streams and provide filename hints
+    // 3) Build readable streams and provide PDF filename hints
     const streams = req.files.map((f) => {
       const s = fs.createReadStream(f.path);
-      s.path = f.originalname || f.path; // hint for parsers/MIME
+      // Force a .pdf-looking name to help MIME detection
+      const base = f.originalname || path.basename(f.path);
+      s.path = base.toLowerCase().endsWith(".pdf") ? base : base + ".pdf";
       return s;
     });
 
@@ -205,8 +207,14 @@ app.post("/admin/upload", requireAdmin, upload.array("files"), async (req, res) 
       `Uploaded ${req.files.length} file(s).\nStatus: ${batch.status}\nStore now has ${list.data.length} file(s).`
     );
   } catch (e) {
-    console.error("UPLOAD ERROR:", e?.response?.data || e?.message || e);
-    res.status(500).send("Upload failed: " + (e.message || e));
+    // Make the real reason visible in the UI and logs
+    const msg =
+      (e && e.response && e.response.data && e.response.data.error && e.response.data.error.message) ||
+      (e && e.response && e.response.data) ||
+      e.message ||
+      String(e);
+    console.error("UPLOAD ERROR (verbose):", msg);
+    res.status(500).send("Upload failed: " + msg);
   }
 });
 
