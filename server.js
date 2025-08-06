@@ -17,7 +17,7 @@ const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const multer = require('multer');
-const OpenAI = require('openai');
+const OpenAI = require('openai').default;
 
 const app = express();
 const upload = multer({ dest: '/tmp' });
