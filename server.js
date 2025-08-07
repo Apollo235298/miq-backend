@@ -7,19 +7,22 @@ const cors = require("cors");
 const bodyParser = require("body-parser");
 const multer = require("multer");
 const OpenAI = require("openai"); // OpenAI SDK v4 (CommonJS)
+
+// --- OpenAI client
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const app = express();
+
 // Save uploaded files to disk under /tmp (Render ephemeral disk)
 const upload = multer({ dest: "/tmp" });
 
-// --- log unhandled errors to Render logs
+// Log unhandled errors to Render logs for easier debugging
 process.on("unhandledRejection", (e) => console.error("UNHANDLED REJECTION:", e));
 process.on("uncaughtException", (e) => console.error("UNCAUGHT EXCEPTION:", e));
 
 // ===== config / env
-const ORIGIN = process.env.ORIGIN || "https://apollo235298.github.io";
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
+const ORIGIN = process.env.ORIGIN || "https://apollo235298.github.io"; // or your Canvas domain
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || ""; // e.g., "miq-admin-2025"
 
 app.use(cors({ origin: ORIGIN }));
 app.use(bodyParser.json({ limit: "25mb" }));
@@ -87,7 +90,7 @@ If evidence is insufficient, say so and suggest where to look.
   }
 });
 
-// ===== admin guard
+// ===== admin auth guard
 function requireAdmin(req, res, next) {
   const token = req.query.token || req.headers["x-admin-token"] || (req.body && req.body.token);
   if (!ADMIN_TOKEN) return res.status(500).send("Admin not configured. Set ADMIN_TOKEN in Environment.");
@@ -153,7 +156,7 @@ async function statusStore(){
 `);
 });
 
-// ===== create store
+// ===== create vector store
 app.post("/admin/create", requireAdmin, async (_req, res) => {
   try {
     const created = await client.vectorStores.create({ name: "ENGAGING-CULTURE" });
@@ -166,7 +169,7 @@ app.post("/admin/create", requireAdmin, async (_req, res) => {
   }
 });
 
-// ===== upload PDFs (sequential, per-file results, reads from /tmp)
+// ===== upload PDFs (per-file; read from /tmp; Files API -> attach to vector store)
 app.post("/admin/upload", requireAdmin, upload.array("files"), async (req, res) => {
   const errText = (e) =>
     (e?.response?.data?.error?.message) ||
@@ -191,22 +194,30 @@ app.post("/admin/upload", requireAdmin, upload.array("files"), async (req, res) 
 
     const lines = [];
 
-    // 3) Upload each file from its TEMP PATH (NOT the original filename)
+    // 3) Upload each file from its TEMP PATH, then attach to the vector store
     for (const f of req.files) {
-      const tmp = f.path;                                 // e.g., /tmp/XXXX
+      const tmp = f.path; // e.g., /tmp/xxxx
       const original = f.originalname || path.basename(tmp);
 
       try {
-        // Always read from the tmp path
+        if (!fs.existsSync(tmp)) {
+          lines.push(`✗ "${original}" failed: temp file not found at ${tmp}`);
+          continue;
+        }
+
+        // Always read from the temp path (fixes ENOENT)
         const stream = fs.createReadStream(tmp);
 
-        // Help MIME detection: set a filename that ends with .pdf
-        stream.path = original.toLowerCase().endsWith(".pdf")
-          ? original
-          : original + ".pdf";
+        // Step A: upload to Files API
+        const uploadedFile = await client.files.create({
+          file: stream,
+          purpose: "assistants"
+        });
 
-        const uploaded = await client.vectorStores.files.create(vs, { file: stream });
-        lines.push(`✓ Uploaded "${original}" → ${uploaded.id} (${uploaded.status || "queued"})`);
+        // Step B: attach to the vector store by file_id
+        await client.vectorStores.files.create(vs, { file_id: uploadedFile.id });
+
+        lines.push(`✓ Uploaded "${original}" → file_id=${uploadedFile.id}`);
       } catch (e) {
         lines.push(`✗ "${original}" failed: ${errText(e)}`);
       } finally {
@@ -271,3 +282,4 @@ Files: ${filesLine}`);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("MIQ backend listening on :" + PORT));
+
