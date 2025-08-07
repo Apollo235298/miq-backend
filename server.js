@@ -6,7 +6,7 @@ const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const multer = require("multer");
-const OpenAI = require("openai");            // OpenAI SDK v4 (CommonJS)
+const OpenAI = require("openai"); // OpenAI SDK v4 (CommonJS)
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const app = express();
@@ -151,34 +151,6 @@ async function statusStore(){
 </script>
 `);
 });
-// Quick diagnostics: checks OpenAI key and vector store access
-app.get("/admin/diag", requireAdmin, async (_req, res) => {
-  try {
-    // Light call to prove the key works
-    await client.models.list();
-
-    const vs = (getVectorStoreId && getVectorStoreId()) || process.env.VECTOR_STORE_ID || "";
-    let filesLine = "n/a (no store)";
-
-    if (vs) {
-      const list = await client.vectorStores.files.list(vs);
-      filesLine = `${list.data.length} file(s)`;
-    }
-
-    res.send(
-      `OpenAI key: OK
-Vector store: ${vs || "(none)"}
-Files: ${filesLine}`
-    );
-  } catch (e) {
-    const msg =
-      e?.response?.data?.error?.message ||
-      e?.response?.data ||
-      e?.message ||
-      String(e);
-    res.status(500).send("Diag failed: " + msg);
-  }
-});
 
 // ===== create store
 app.post("/admin/create", requireAdmin, async (_req, res) => {
@@ -193,7 +165,7 @@ app.post("/admin/create", requireAdmin, async (_req, res) => {
   }
 });
 
-// ===== upload PDFs (robust batch uploader with verbose errors)
+// ===== upload PDFs (batch uploader + verbose error unwrapping)
 app.post("/admin/upload", requireAdmin, upload.array("files"), async (req, res) => {
   try {
     // 1) Resolve/validate the vector store id as a plain string
@@ -220,58 +192,4 @@ app.post("/admin/upload", requireAdmin, upload.array("files"), async (req, res) 
     });
 
     // 4) Batch upload (handles multiple PDFs + processing)
-    const batch = await client.vectorStores.fileBatches.uploadAndPoll(vs, {
-      files: streams
-    });
-
-    // 5) Clean up temp files
-    for (const f of req.files) {
-      try { fs.unlinkSync(f.path); } catch {}
-    }
-
-    // 6) Report store status
-    const list = await client.vectorStores.files.list(vs);
-    res.send(
-      `Uploaded ${req.files.length} file(s).\nStatus: ${batch.status}\nStore now has ${list.data.length} file(s).`
-    );
-  } catch (e) {
-  // Try to unwrap AggregateError (the SDK uses this)
-  let msg = e?.message || String(e);
-
-  if (e?.name === "AggregateError" && Array.isArray(e?.errors) && e.errors.length) {
-    msg = e.errors
-      .map((x) =>
-        x?.response?.data?.error?.message ||
-        x?.response?.data ||
-        x?.message ||
-        String(x)
-      )
-      .join(" | ");
-  }
-
-  // Fall back to a normal HTTP error payload
-  if (e?.response?.data?.error?.message) msg = e.response.data.error.message;
-  else if (e?.response?.data) msg = JSON.stringify(e.response.data);
-
-  console.error("UPLOAD ERROR (verbose):", msg);
-  res.status(500).send("Upload failed: " + msg);
-}
-
-
-// ===== status
-app.get("/admin/status", requireAdmin, async (_req, res) => {
-  const vs = getVectorStoreId();
-  if (!vs) return res.send("No vector store configured yet.");
-  try {
-    const list = await client.vectorStores.files.list(vs);
-    res.send(`Vector store: ${vs}
-Files: ${list.data.length}
-` + list.data.map(x => `- ${x.id} (${x.status})`).join("\n"));
-  } catch (e) {
-    console.error("STATUS ERROR:", e?.response?.data || e?.message || e);
-    res.status(500).send("Status error: " + (e.message || e));
-  }
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("MIQ backend listening on :" + PORT));
+    const batch = await client.vectorStores.fileBatc
