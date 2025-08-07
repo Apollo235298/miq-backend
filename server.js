@@ -207,16 +207,28 @@ app.post("/admin/upload", requireAdmin, upload.array("files"), async (req, res) 
       `Uploaded ${req.files.length} file(s).\nStatus: ${batch.status}\nStore now has ${list.data.length} file(s).`
     );
   } catch (e) {
-    // Make the real reason visible in the UI and logs
-    const msg =
-      (e && e.response && e.response.data && e.response.data.error && e.response.data.error.message) ||
-      (e && e.response && e.response.data) ||
-      e.message ||
-      String(e);
-    console.error("UPLOAD ERROR (verbose):", msg);
-    res.status(500).send("Upload failed: " + msg);
+  // Try to unwrap AggregateError (the SDK uses this)
+  let msg = e?.message || String(e);
+
+  if (e?.name === "AggregateError" && Array.isArray(e?.errors) && e.errors.length) {
+    msg = e.errors
+      .map((x) =>
+        x?.response?.data?.error?.message ||
+        x?.response?.data ||
+        x?.message ||
+        String(x)
+      )
+      .join(" | ");
   }
-});
+
+  // Fall back to a normal HTTP error payload
+  if (e?.response?.data?.error?.message) msg = e.response.data.error.message;
+  else if (e?.response?.data) msg = JSON.stringify(e.response.data);
+
+  console.error("UPLOAD ERROR (verbose):", msg);
+  res.status(500).send("Upload failed: " + msg);
+}
+
 
 // ===== status
 app.get("/admin/status", requireAdmin, async (_req, res) => {
