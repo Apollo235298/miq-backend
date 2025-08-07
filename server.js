@@ -185,11 +185,84 @@ app.post("/admin/upload", requireAdmin, upload.array("files"), async (req, res) 
     // 3) Build readable streams and provide PDF filename hints
     const streams = req.files.map((f) => {
       const s = fs.createReadStream(f.path);
-      // Force a .pdf-looking name to help MIME detection
       const base = f.originalname || path.basename(f.path);
       s.path = base.toLowerCase().endsWith(".pdf") ? base : base + ".pdf";
       return s;
     });
 
     // 4) Batch upload (handles multiple PDFs + processing)
-    const batch = await client.vectorStores.fileBatc
+    const batch = await client.vectorStores.fileBatches.uploadAndPoll(vs, {
+      files: streams
+    });
+
+    // 5) Clean up temp files
+    for (const f of req.files) {
+      try { fs.unlinkSync(f.path); } catch {}
+    }
+
+    // 6) Report store status
+    const list = await client.vectorStores.files.list(vs);
+    res.send(
+      `Uploaded ${req.files.length} file(s).\nStatus: ${batch.status}\nStore now has ${list.data.length} file(s).`
+    );
+  } catch (e) {
+    // Unwrap AggregateError & common SDK/HTTP payloads
+    let msg = e?.message || String(e);
+    if (e?.name === "AggregateError" && Array.isArray(e?.errors) && e.errors.length) {
+      msg = e.errors
+        .map((x) =>
+          x?.response?.data?.error?.message ||
+          x?.response?.data ||
+          x?.message ||
+          String(x)
+        )
+        .join(" | ");
+    }
+    if (e?.response?.data?.error?.message) msg = e.response.data.error.message;
+    else if (e?.response?.data) msg = JSON.stringify(e.response.data);
+
+    console.error("UPLOAD ERROR (verbose):", msg);
+    res.status(500).send("Upload failed: " + msg);
+  }
+});
+
+// ===== status
+app.get("/admin/status", requireAdmin, async (_req, res) => {
+  const vs = getVectorStoreId();
+  if (!vs) return res.send("No vector store configured yet.");
+  try {
+    const list = await client.vectorStores.files.list(vs);
+    res.send(`Vector store: ${vs}
+Files: ${list.data.length}
+` + list.data.map(x => `- ${x.id} (${x.status})`).join("\n"));
+  } catch (e) {
+    console.error("STATUS ERROR:", e?.response?.data || e?.message || e);
+    res.status(500).send("Status error: " + (e.message || e));
+  }
+});
+
+// ===== quick diagnostics (prove key + store are usable)
+app.get("/admin/diag", requireAdmin, async (_req, res) => {
+  try {
+    await client.models.list(); // simple call to verify key
+    const vs = (getVectorStoreId && getVectorStoreId()) || process.env.VECTOR_STORE_ID || "";
+    let filesLine = "n/a (no store)";
+    if (vs) {
+      const list = await client.vectorStores.files.list(vs);
+      filesLine = `${list.data.length} file(s)`;
+    }
+    res.send(`OpenAI key: OK
+Vector store: ${vs || "(none)"}
+Files: ${filesLine}`);
+  } catch (e) {
+    const msg =
+      e?.response?.data?.error?.message ||
+      e?.response?.data ||
+      e?.message ||
+      String(e);
+    res.status(500).send("Diag failed: " + msg);
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log("MIQ backend listening on :" + PORT));
