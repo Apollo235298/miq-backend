@@ -10,6 +10,7 @@ const OpenAI = require("openai"); // OpenAI SDK v4 (CommonJS)
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const app = express();
+// Save uploaded files to disk under /tmp (Render ephemeral disk)
 const upload = multer({ dest: "/tmp" });
 
 // --- log unhandled errors to Render logs
@@ -165,10 +166,16 @@ app.post("/admin/create", requireAdmin, async (_req, res) => {
   }
 });
 
-// ===== upload PDFs (batch uploader + verbose error unwrapping)
+// ===== upload PDFs (sequential, per-file results, reads from /tmp)
 app.post("/admin/upload", requireAdmin, upload.array("files"), async (req, res) => {
+  const errText = (e) =>
+    (e?.response?.data?.error?.message) ||
+    (e?.response?.data && JSON.stringify(e.response.data)) ||
+    e?.message ||
+    String(e);
+
   try {
-    // 1) Resolve/validate the vector store id as a plain string
+    // 1) Resolve/validate vector store id
     const vsRaw = (getVectorStoreId && getVectorStoreId()) || process.env.VECTOR_STORE_ID || "";
     const vs = (typeof vsRaw === "string" ? vsRaw : (vsRaw && vsRaw.id) || "").toString().trim();
     if (!/^vs_[A-Za-z0-9_-]+$/.test(vs)) {
@@ -177,50 +184,48 @@ app.post("/admin/upload", requireAdmin, upload.array("files"), async (req, res) 
         .send(`Vector store id is invalid. Got "${String(vsRaw)}". Set VECTOR_STORE_ID to an id like vs_abc123...`);
     }
 
-    // 2) Ensure we actually received files
-    if (!req.files || req.files.length === 0) {
+    // 2) Ensure files exist
+    if (!req.files || !req.files.length) {
       return res.status(400).send("No files received. Use 'Choose Files' first, then click 'Upload PDFs'.");
     }
 
-    // 3) Build readable streams and provide PDF filename hints
-    const streams = req.files.map((f) => {
-      const s = fs.createReadStream(f.path);
-      const base = f.originalname || path.basename(f.path);
-      s.path = base.toLowerCase().endsWith(".pdf") ? base : base + ".pdf";
-      return s;
-    });
+    const lines = [];
 
-    // 4) Batch upload (handles multiple PDFs + processing)
-    const batch = await client.vectorStores.fileBatches.uploadAndPoll(vs, {
-      files: streams
-    });
-
-    // 5) Clean up temp files
+    // 3) Upload each file from its TEMP PATH (NOT the original filename)
     for (const f of req.files) {
-      try { fs.unlinkSync(f.path); } catch {}
+      const tmp = f.path;                                 // e.g., /tmp/XXXX
+      const original = f.originalname || path.basename(tmp);
+
+      try {
+        // Always read from the tmp path
+        const stream = fs.createReadStream(tmp);
+
+        // Help MIME detection: set a filename that ends with .pdf
+        stream.path = original.toLowerCase().endsWith(".pdf")
+          ? original
+          : original + ".pdf";
+
+        const uploaded = await client.vectorStores.files.create(vs, { file: stream });
+        lines.push(`✓ Uploaded "${original}" → ${uploaded.id} (${uploaded.status || "queued"})`);
+      } catch (e) {
+        lines.push(`✗ "${original}" failed: ${errText(e)}`);
+      } finally {
+        try { fs.unlinkSync(tmp); } catch {}
+      }
     }
 
-    // 6) Report store status
-    const list = await client.vectorStores.files.list(vs);
-    res.send(
-      `Uploaded ${req.files.length} file(s).\nStatus: ${batch.status}\nStore now has ${list.data.length} file(s).`
-    );
+    // 4) Show current store contents
+    try {
+      const list = await client.vectorStores.files.list(vs);
+      lines.push(`Store now has ${list.data.length} file(s).`);
+      for (const x of list.data) lines.push(`- ${x.id} (${x.status})`);
+    } catch (e) {
+      lines.push(`(Could not list store files: ${errText(e)})`);
+    }
+
+    res.send(lines.join("\n"));
   } catch (e) {
-    // Unwrap AggregateError & common SDK/HTTP payloads
-    let msg = e?.message || String(e);
-    if (e?.name === "AggregateError" && Array.isArray(e?.errors) && e.errors.length) {
-      msg = e.errors
-        .map((x) =>
-          x?.response?.data?.error?.message ||
-          x?.response?.data ||
-          x?.message ||
-          String(x)
-        )
-        .join(" | ");
-    }
-    if (e?.response?.data?.error?.message) msg = e.response.data.error.message;
-    else if (e?.response?.data) msg = JSON.stringify(e.response.data);
-
+    const msg = errText(e);
     console.error("UPLOAD ERROR (verbose):", msg);
     res.status(500).send("Upload failed: " + msg);
   }
