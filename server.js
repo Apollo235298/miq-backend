@@ -151,6 +151,34 @@ async function statusStore(){
 </script>
 `);
 });
+// Quick diagnostics: checks OpenAI key and vector store access
+app.get("/admin/diag", requireAdmin, async (_req, res) => {
+  try {
+    // Light call to prove the key works
+    await client.models.list();
+
+    const vs = (getVectorStoreId && getVectorStoreId()) || process.env.VECTOR_STORE_ID || "";
+    let filesLine = "n/a (no store)";
+
+    if (vs) {
+      const list = await client.vectorStores.files.list(vs);
+      filesLine = `${list.data.length} file(s)`;
+    }
+
+    res.send(
+      `OpenAI key: OK
+Vector store: ${vs || "(none)"}
+Files: ${filesLine}`
+    );
+  } catch (e) {
+    const msg =
+      e?.response?.data?.error?.message ||
+      e?.response?.data ||
+      e?.message ||
+      String(e);
+    res.status(500).send("Diag failed: " + msg);
+  }
+});
 
 // ===== create store
 app.post("/admin/create", requireAdmin, async (_req, res) => {
